@@ -33,6 +33,10 @@ Step 2: Model processes "The capital of France is Paris" → predicts: ","
 Step 3: Model processes "The capital of France is Paris," → predicts: "a"
 Step 4: Model processes "The capital of France is Paris, a" → predicts: "city"
 ... continues until stop condition (max tokens, EOS token, stop sequence)
+
+Each next word = full model run again
+So if output = 500 tokens → 500 times model runs
+And each step depends on previous output → can’t parallelize
 ```
 
 **Why this matters for infrastructure:**
