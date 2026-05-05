@@ -1083,3 +1083,1549 @@ The communication library for multi-GPU training. Study:
 - Debugging NCCL failures (the bane of distributed training)
 
 ---
+# Complete Study Guide: DevOps/SRE → AI Infra / MLOps Engineer
+## Part 2: Phases 5–9 + Cross-Cutting Topics
+
+---
+
+# Phase 5: Model Packaging, Serving & Inference
+
+> **Goal:** Learn how to take a trained model and make it available as a reliable, scalable, low-latency service. This is where software engineering meets ML.
+>
+> **Time estimate:** 3–4 weeks
+
+---
+
+## 5.1 Model Serialization Formats
+
+Before you can serve a model, you must understand how to save and load it. Each format has different portability, performance, and ecosystem tradeoffs.
+
+### PyTorch Formats
+
+**torch.save / torch.load (pickle-based):**
+The simplest approach. Serializes the entire model (architecture + weights) using Python pickle.
+- Fast and easy, but Python/PyTorch-version dependent
+- Not portable across frameworks
+- Security risk (pickle can execute arbitrary code on load)
+- Use only for checkpointing during training, never for serving untrusted models
+
+**TorchScript:**
+Compiles PyTorch model into an intermediate representation that can run without a Python interpreter.
+- `torch.jit.script`: Compiles based on code analysis (supports control flow)
+- `torch.jit.trace`: Records execution trace (faster, but doesn't capture dynamic control flow)
+- Portable across Python versions, can run in C++ via LibTorch
+- Useful for mobile and embedded deployment
+
+**ONNX (Open Neural Network Exchange):**
+Framework-agnostic model format. Convert once, run anywhere — PyTorch, TensorFlow, scikit-learn, XGBoost, all export to ONNX. ONNX Runtime optimizes and executes ONNX models efficiently.
+- Study: `torch.onnx.export`, ONNX Runtime inference, operator support and limitations, opset versions
+- ONNX Runtime supports CPU, CUDA, TensorRT, OpenVINO, and DirectML execution providers
+- Limitations: Dynamic shapes, custom ops, and some model architectures don't export cleanly
+
+**SafeTensors (Hugging Face):**
+Safe, fast alternative to pickle for storing model weights only (not architecture).
+- No code execution risk (unlike pickle)
+- Memory-mapped loading (extremely fast for large models)
+- The standard for storing LLM weights in the Hugging Face ecosystem
+- Architecture defined separately in `config.json`
+
+### TensorFlow Formats
+
+**SavedModel:**
+TensorFlow's standard serialization format. Contains the computation graph and weights.
+- Portable across TensorFlow versions
+- Includes serving signatures (input/output specs)
+- Supported by TensorFlow Serving and TFLite
+
+**TFLite:**
+Compressed format for mobile and edge deployment.
+
+### Universal Formats
+
+**GGUF (GPT-Generated Unified Format):**
+The format used by llama.cpp for running LLMs on CPU and Apple Silicon. Stores weights with mixed precision (different layers at different bit widths). The format of choice for local LLM inference outside the cloud.
+
+**TensorRT Engine:**
+NVIDIA's compiled execution engine. Platform and hardware-specific — must be compiled for the target GPU architecture. Maximum performance on NVIDIA hardware.
+
+### Comparison Matrix
+
+| Format | Portability | Performance | Use Case |
+|--------|-------------|-------------|----------|
+| PyTorch .pt/.bin | Low (Python only) | Baseline | Training checkpoints |
+| SafeTensors | Medium (needs architecture code) | Fast load | HuggingFace model distribution |
+| TorchScript | Medium (PyTorch ecosystem) | Good | Edge, mobile, C++ serving |
+| ONNX | High (any ONNX runtime) | Good (with ORT) | Cross-framework deployment |
+| TensorRT Engine | Very Low (GPU-specific) | Maximum | Production NVIDIA serving |
+| GGUF | Medium (llama.cpp ecosystem) | Good on CPU | Local inference, CPU serving |
+
+## 5.2 Model Registries
+
+A model registry is the system of record for trained models — versioning, metadata, lineage, and lifecycle management.
+
+### MLflow Model Registry
+
+Study:
+- Registering models from training runs
+- Model versioning (each registered model can have multiple versions)
+- Model stages: None → Staging → Production → Archived
+- Transition workflows and approval
+- Model aliases (tag a version as "champion" or "challenger")
+- Model descriptions and tags for searchability
+- REST API for programmatic access
+- Integration with CI/CD pipelines for automated promotion
+- Deployment from registry to serving infrastructure
+
+### Hugging Face Hub / Model Registry
+
+Study:
+- Pushing models to Hugging Face Hub (public and private)
+- Model cards (documentation standard)
+- Pulling models for inference (from_pretrained API)
+- Private repositories and access tokens
+- Organization management
+- Using Hub as a model registry for self-hosted deployments
+
+### Vertex AI Model Registry (GCP)
+
+Study:
+- Importing models (from GCS, BigQuery, or training jobs)
+- Model versions and labels
+- Model evaluation tracking
+- Endpoint management and traffic splitting
+- Integration with Vertex AI Pipelines
+
+### Vendor-Specific Registries
+
+- **AWS SageMaker Model Registry:** Groups, versions, and approval workflows for SageMaker
+- **Azure Machine Learning Model Registry:** Model versioning, environments, and deployment
+
+## 5.3 Serving Frameworks
+
+### vLLM (covered in detail in Phase 7.1)
+
+The current industry standard for LLM serving. OpenAI-compatible API, PagedAttention for memory efficiency, continuous batching.
+
+### NVIDIA Triton Inference Server
+
+The most feature-complete model serving framework for production. Supports TensorRT, ONNX, TorchScript, TensorFlow, Python backends, and more.
+
+Study:
+- **Model repository structure:** Directory layout with model versions and config
+- **Configuration (`config.pbtxt`):** Input/output tensor specs, backend selection, batching configuration, instance groups (multiple model instances per GPU)
+- **Dynamic batching:** Server-side batching of requests for throughput
+- **Ensemble pipelines:** Chain multiple models (preprocessing → model → postprocessing)
+- **gRPC and HTTP APIs:** Client libraries (tritonclient)
+- **Backend types:** TensorRT, ONNX Runtime, PyTorch (LibTorch), TensorFlow, Python (custom)
+- **Model control mode:** Poll, explicit (on-demand load/unload)
+- **Rate limiting and priority scheduling**
+- **Metrics endpoint:** Prometheus-compatible metrics (request count, queue time, compute time)
+- **GPU and CPU instance groups:** Load same model on multiple GPUs or CPUs
+
+```
+triton/
+└── model_repository/
+    └── llama_70b/
+        ├── config.pbtxt      # Model configuration
+        ├── 1/                # Model version 1
+        │   └── model.plan    # TensorRT engine (or model.onnx, model.pt, etc.)
+        └── 2/                # Model version 2
+            └── model.plan
+```
+
+### TorchServe
+
+PyTorch's native model server. Designed for PyTorch models specifically.
+
+Study:
+- Model archiver (torch-model-archiver): Package model, handler, and dependencies into a .mar file
+- Handler classes: Default handlers (image_classifier, text_classifier), custom handlers
+- Management API: Load/unload models, scale workers
+- Inference API: HTTP and gRPC endpoints
+- Batch inference
+- Custom handlers for preprocessing and postprocessing
+- Logging and metrics
+
+### BentoML
+
+Framework for building and deploying ML services with a focus on developer experience.
+
+Study:
+- Runners: Wrap ML models as scalable components
+- Service definition: Define endpoints with input/output types
+- Bentos: Packaged services with all dependencies
+- Containerization: `bentml containerize` builds Docker images
+- Deployment to Kubernetes, AWS SageMaker, Google Cloud Run
+- Input/output validation with Pydantic
+- Adaptive batching
+
+### Seldon Core
+
+Kubernetes-native model serving platform focused on enterprise features.
+
+Study:
+- SeldonDeployment CRD: Define serving infrastructure in Kubernetes
+- Pre-packaged servers: MLflow, Triton, TorchServe, SKLearn
+- Custom servers: Python microservice approach
+- Inference graphs: Chain models, routers, and combiners
+- A/B testing and traffic splitting
+- Canary rollouts
+- Explanability integration (SHAP, Anchors)
+- Outlier detection and drift detection integration
+
+### FastAPI for Custom Serving
+
+Sometimes the right approach is building a custom serving API with FastAPI.
+
+Study:
+- Async request handling
+- Background tasks for preprocessing
+- Lifespan events (load model on startup)
+- Pydantic models for request/response validation
+- Streaming responses for token streaming
+- Prometheus metrics middleware
+- Health check endpoints
+- CORS handling
+
+## 5.4 A/B Testing and Canary Deployments for Models
+
+Model updates are risky. You need to gradually expose users to new models and compare performance.
+
+**A/B Testing:**
+Route a percentage of traffic to the new model, compare metrics.
+- Define success metrics (accuracy, latency, user engagement)
+- Randomize assignment consistently (same user always sees same model)
+- Statistical significance testing
+- Shadow mode: Send requests to both models, compare outputs without affecting users
+
+**Canary Deployments:**
+Gradually increase traffic to new model: 1% → 5% → 20% → 50% → 100%.
+- Automated rollback on metric regression
+- Monitor error rates, latency, and model quality metrics
+
+**Tools:**
+- Kubernetes Gateway API / Istio for traffic splitting
+- Argo Rollouts for automated canary analysis
+- Seldon Core for ML-specific A/B testing and shadow deployments
+- Feature flags for model routing
+
+## 5.5 Batch Inference
+
+Not all inference needs to be real-time. Many ML workloads are batch: run predictions on millions of records overnight.
+
+Study:
+- Batch vs online inference tradeoffs
+- Spark MLlib for distributed batch inference
+- Ray for parallelized batch inference
+- Batched GPU inference with PyTorch DataLoader
+- Output storage: predictions back to database, data warehouse, or feature store
+- Scheduling with Airflow or Kubernetes CronJobs
+- Optimizing batch throughput: maximum batch sizes, mixed precision, model optimization
+
+## 5.6 Inference Optimization
+
+### Quantization
+
+Covered in detail in Phase 7.1. Summary:
+- FP16/BF16: Standard, no quality loss
+- INT8: ~2x memory reduction, slight quality impact, use bitsandbytes or ONNX Runtime quantization
+- INT4: ~4x memory reduction, noticeable quality impact, use GPTQ or AWQ for LLMs
+
+### Pruning
+
+Remove unnecessary weights (set them to zero) or entire neurons/heads.
+- **Unstructured pruning:** Zero out individual weights. High compression ratio but poor hardware acceleration (sparse computation is not well-supported on GPUs).
+- **Structured pruning:** Remove entire neurons, attention heads, or layers. Lower compression but better hardware acceleration.
+- Study: `torch.nn.utils.prune`, magnitude pruning, gradient-based pruning
+
+### Knowledge Distillation
+
+Train a smaller "student" model to mimic a larger "teacher" model.
+- Student learns from teacher's soft probability outputs (not just hard labels)
+- Much more sample-efficient than training from scratch
+- Study: distillation loss (KL divergence between teacher and student outputs), temperature scaling
+
+### ONNX Runtime Optimization
+
+- Graph optimization (constant folding, node fusion)
+- Execution providers (CUDA, TensorRT, OpenVINO)
+- Quantization (static and dynamic)
+
+---
+
+# Phase 6: MLOps Pipelines & Automation
+
+> **Goal:** Build the automated systems that make ML development reproducible, reliable, and scalable. This is the core of "MLOps" and is where your DevOps background is most directly applicable.
+>
+> **Time estimate:** 4–5 weeks
+
+---
+
+## 6.1 CI/CD for Machine Learning
+
+Traditional CI/CD tests and deploys code. ML CI/CD must additionally handle data, models, and statistical tests.
+
+### The Four Types of Tests in ML CI/CD
+
+**Code tests:** Unit tests for feature engineering code, data processing functions, and custom model layers. Standard pytest/unittest.
+
+**Data tests:** Validate the training data. Schema checks, distribution checks, data quality assertions with Great Expectations or Pandera.
+
+**Model training tests:** Does the model train without errors? Does loss decrease? Are metrics above a minimum threshold? Run a mini-training job.
+
+**Model quality tests:** Does the model perform better than the current production model? Is it above the minimum acceptable threshold? Run inference on a held-out evaluation set.
+
+### CI/CD Pipeline Structure for ML
+
+```
+Developer pushes code
+        │
+        ▼
+  ┌─────────────┐
+  │ 1. Code CI  │── Unit tests, linting, type checking
+  └──────┬──────┘
+         │
+         ▼
+  ┌─────────────┐
+  │ 2. Data CI  │── Data validation, schema tests, drift detection
+  └──────┬──────┘
+         │
+         ▼
+  ┌─────────────┐
+  │ 3. Train    │── Training job (mini or full), experiment tracking
+  └──────┬──────┘
+         │
+         ▼
+  ┌─────────────┐
+  │ 4. Evaluate │── Benchmark vs production model, quality gates
+  └──────┬──────┘
+         │ (pass quality gate)
+         ▼
+  ┌─────────────┐
+  │ 5. Stage    │── Deploy to staging, integration tests
+  └──────┬──────┘
+         │
+         ▼
+  ┌─────────────┐
+  │ 6. Deploy   │── Canary → Production promotion
+  └─────────────┘
+```
+
+### GitHub Actions for ML
+
+Study:
+- Defining ML workflows in `.github/workflows/`
+- Self-hosted runners with GPU access for training jobs
+- Caching dependencies and model artifacts
+- Secrets management (cloud credentials, API keys)
+- Matrix jobs for testing across Python/PyTorch versions
+- Triggering retraining on data changes (via DVC or webhooks)
+- Model deployment actions (push to registry, update serving config)
+
+### DVC in CI/CD
+
+Study:
+- `dvc pull` in CI to get datasets
+- `dvc repro` to reproduce pipelines
+- `dvc metrics show` and `dvc metrics diff` for comparing model performance
+- CML (Continuous Machine Learning): DVC's companion for ML CI/CD reporting. Comments metrics and plots directly on GitHub/GitLab PRs.
+
+## 6.2 ML Pipeline Orchestrators
+
+### Kubeflow Pipelines
+
+Kubernetes-native ML workflow orchestration. Defines pipelines as Python code compiled to YAML.
+
+Study:
+- **Components:** Containerized pipeline steps defined with `@component` decorator
+- **Pipelines:** Composed from components with `@pipeline` decorator
+- **Artifacts:** Pass datasets, models, and metrics between components
+- **Caching:** Skip re-running steps when inputs haven't changed
+- **Pipeline parameters:** Configurable values per pipeline run
+- **KFP SDK:** Python SDK for defining and submitting pipelines
+- **Visualizations:** ROC curves, confusion matrices as pipeline step outputs
+- **Recurring runs:** Scheduled pipeline execution
+- **Integration with Vertex AI Pipelines:** GCP's managed Kubeflow Pipelines
+
+### ZenML
+
+Framework-agnostic MLOps pipeline tool. Same Python code runs locally, on Airflow, on Kubeflow, or on Vertex AI.
+
+Study:
+- Steps and pipelines (Python decorators)
+- Materializers (how artifacts are serialized/deserialized)
+- Stack: combination of orchestrator + artifact store + model registry
+- ZenML Server for team collaboration
+- Integration hub: 50+ integrations with ML tools
+
+### Metaflow (Netflix)
+
+Designed to be simple for data scientists while handling cloud execution transparently.
+
+Study:
+- Flow and steps (Python class-based)
+- `@step` decorator and data passing between steps
+- `@resources` decorator for specifying compute (CPU, memory, GPU)
+- `@conda` / `@pypi` for dependency management
+- Local development and cloud execution (AWS Batch, Kubernetes)
+- `@retry` and `@catch` for fault tolerance
+- Metaflow Cards for step documentation and visualization
+- The `.metaflow` local metadata store and remote metadata service
+
+### Vertex AI Pipelines (GCP)
+
+Managed Kubeflow Pipelines on Google Cloud. Study if your organization is on GCP:
+- Pre-built Google Cloud components (BigQuery, AutoML, etc.)
+- Integration with Vertex AI experiments and model registry
+- Pipeline scheduling and triggering
+- Artifact lineage and metadata tracking
+
+## 6.3 GitOps for ML
+
+### What to Version
+
+Everything that determines model behavior must be versioned:
+- **Code:** Training scripts, preprocessing, feature engineering (Git)
+- **Data:** Dataset version, data processing config (DVC, LakeFS)
+- **Config:** Hyperparameters, architecture choices (Git, Hydra, YAML)
+- **Model:** Trained weights and metadata (MLflow/W&B registry + artifact store)
+- **Environment:** Python package versions, Docker image (requirements.txt, Dockerfile, Git)
+- **Infrastructure:** Serving config, Kubernetes manifests (Git + Helm/Kustomize)
+
+### Hydra for Configuration Management
+
+Study:
+- Structured configs with Python dataclasses
+- Config composition (override from command line or other configs)
+- Config groups for different environments/experiments
+- Multirun for sweeping over config combinations
+- Integration with Optuna for hyperparameter optimization
+
+### Reproducibility
+
+A training run should be reproducible given the same inputs. Study:
+- Random seed management (torch.manual_seed, numpy.random.seed)
+- Deterministic algorithms in PyTorch
+- Recording all config, data version, and code version in experiment tracking
+- Docker for environment reproducibility
+
+## 6.4 Automated Testing for ML
+
+### Data Tests
+
+Using Great Expectations or Pandera:
+- Schema tests: column names, types, no unexpected columns
+- Distribution tests: mean, std, min, max within expected ranges
+- Uniqueness tests: primary keys are unique
+- Completeness tests: no nulls in required columns
+- Consistency tests: derived columns match their derivation
+
+### Model Tests
+
+**Behavioral tests (CheckList methodology):**
+- **Minimum functionality:** The model must get simple, unambiguous examples right
+- **Invariance tests:** The model output should not change when irrelevant input changes (e.g., name change should not change sentiment)
+- **Directional tests:** The model output should change in a predictable direction when input changes (e.g., adding "not" to a positive review should decrease sentiment score)
+
+**Regression tests:**
+- Performance on a held-out test set must stay above a threshold
+- Comparison against the current production model ("challenger vs champion")
+
+**Infrastructure tests:**
+- Model loads successfully
+- Inference API returns correct response format
+- Response time under SLA for a set of test inputs
+- Model handles edge cases (empty input, max length input, unicode)
+
+## 6.5 Infrastructure as Code for ML Workloads
+
+### Terraform for ML Infrastructure
+
+Study:
+- GPU instance provisioning (AWS p3/p4/p5, GCP A2/A3, Azure NCv3/NCasT4)
+- Networking setup for GPU clusters (VPCs, security groups, placement groups)
+- Managed ML services (SageMaker, Vertex AI, Azure ML)
+- Storage for datasets and models (S3, GCS, Azure Blob)
+- Kubernetes clusters with GPU node pools (EKS, GKE, AKS)
+- Secrets management (AWS Secrets Manager, GCP Secret Manager, HashiCorp Vault)
+
+### Helm for ML Workloads
+
+Study:
+- Helm charts for MLflow, Kubeflow, Airflow, JupyterHub
+- Custom values files per environment (dev, staging, prod)
+- Helm chart for vLLM serving deployments
+- Dependency management (umbrella charts)
+
+### Kustomize
+
+Study:
+- Kustomization files for environment overlays
+- Patches for GPU resource limits/requests
+- ConfigMap and Secret generators
+- Integration with GitOps tools (ArgoCD, Flux)
+
+---
+
+# Phase 7: LLM & GenAI Infrastructure
+
+> **Goal:** Become an expert in the infrastructure that powers large language models. This is the highest-demand specialization in 2025–2026.
+>
+> **Time estimate:** 6–8 weeks
+
+---
+
+## 7.1 LLM Serving & Optimization
+
+*(Full deep-dive guide available separately)*
+
+### Core Inference Concepts
+
+**Autoregressive generation loop:** Token-by-token generation; each token depends on all previous tokens; sequential decode phase with parallel prefill.
+
+**Prefill vs decode phases:** Prefill processes the entire prompt in parallel (compute-bound, determines TTFT); decode generates tokens one at a time (memory-bandwidth-bound, determines ITL).
+
+**KV Cache:** Stores Key and Value vectors for all processed tokens to avoid recomputation. Memory is O(layers × sequence_length × batch_size). The primary memory bottleneck in LLM serving.
+
+**Batching strategies:**
+- Static batching: Fixed batch waits for slowest request
+- Continuous/dynamic batching: Tokens are scheduled at each decode step; completed requests immediately free slots
+
+**Throughput vs latency tradeoffs:** Larger batches → higher throughput, higher latency. Tune based on workload (interactive chat vs batch processing).
+
+### Serving Frameworks
+
+**vLLM:**
+- PagedAttention: Block-based KV cache management eliminating memory fragmentation
+- Continuous batching with iteration-level scheduling
+- Prefix caching: Share KV cache blocks for common system prompts
+- Tensor parallelism across multiple GPUs
+- OpenAI-compatible REST API
+- Quantization: AWQ, GPTQ, FP8, bitsandbytes
+- Docker and Kubernetes deployment
+- Configuration: `--gpu-memory-utilization`, `--max-model-len`, `--tensor-parallel-size`, `--enable-prefix-caching`, `--swap-space`
+- Benchmarking: `benchmark_throughput.py`, `benchmark_serving.py`
+
+**TGI (Text Generation Inference):**
+- Rust-based core for performance
+- Flash Attention integration (first-class)
+- Speculative decoding (first-class)
+- Watermark-based continuous batching
+- HuggingFace model ecosystem native
+- When to choose: Speculative decoding, HF ecosystem integration, managed via HF Inference Endpoints
+
+**TensorRT-LLM:**
+- Compile-time model optimization into TRT engines
+- Kernel fusion and layout optimization
+- FP8 quantization (native on H100+)
+- In-flight batching
+- Integration with Triton Inference Server
+- When to choose: Maximum throughput on NVIDIA hardware, multi-model serving, enterprise deployments
+
+### Inference Optimization Techniques
+
+**Quantization (deep dive):**
+- FP32 → FP16/BF16: Standard baseline, negligible quality loss
+- FP8 (E4M3/E5M2): Native on H100, ~2x speedup, near-FP16 quality
+- INT8: bitsandbytes (simple), ONNX Runtime (cross-platform), Smooth Quant (activation-aware)
+- INT4 via GPTQ: Post-training, requires calibration dataset, good quality
+- INT4 via AWQ: Activation-aware weight quantization, better than GPTQ for most models
+- GGUF: llama.cpp format, CPU/Apple Silicon, mixed precision per layer
+
+**Speculative decoding:**
+- Draft model proposes K tokens; target model verifies in one forward pass
+- Acceptance rate depends on draft-target alignment (same family: 70–90%)
+- Optimal for low-concurrency, latency-sensitive workloads
+- Medusa: Multiple draft heads within a single model (no separate draft model needed)
+
+**KV cache optimizations:**
+- Multi-Query Attention (MQA): All heads share one KV pair — aggressive reduction
+- Grouped-Query Attention (GQA): Groups of heads share KV pairs — used by Llama 3, Mistral
+- Sliding Window Attention: Bound KV cache size to a fixed window
+- Prefix caching: Share KV cache across requests with identical prefixes
+
+**Model parallelism for serving:**
+- Tensor Parallelism: Split weight matrices across GPUs; requires NVLink; all GPUs on same node
+- Pipeline Parallelism: Split layers across GPUs; works across nodes; pipeline bubbles
+- When to use each: TP for intra-node, PP for cross-node
+- TP degree must divide num_attention_heads evenly
+
+**Structured output optimization:**
+- Constrained decoding: Restrict next tokens to valid grammar/schema
+- Grammar-guided generation: Use formal grammars (JSON Schema, EBNF)
+- Tools: Outlines library, vLLM guided decoding, XGrammar
+
+### Hardware Knowledge
+
+**GPU comparison:**
+
+| GPU | VRAM | Mem BW | FP16 TFLOPS | FP8 TFLOPS | NVLink BW |
+|-----|------|--------|-------------|------------|-----------|
+| A100 40GB | 40 GB | 1.6 TB/s | 312 | — | 600 GB/s |
+| A100 80GB | 80 GB | 2.0 TB/s | 312 | — | 600 GB/s |
+| H100 SXM | 80 GB | 3.35 TB/s | 990 | 1,979 | 900 GB/s |
+| H200 | 141 GB | 4.8 TB/s | 990 | 1,979 | 900 GB/s |
+| B200 | 192 GB | 8.0 TB/s | 2,250 | 4,500 | 1,800 GB/s |
+| L40S | 48 GB | 864 GB/s | 366 | 733 | — |
+| A10G | 24 GB | 600 GB/s | 125 | — | — |
+
+**Memory bandwidth dominates decode speed.** Key formula:
+`Theoretical max tokens/sec ≈ Memory Bandwidth / Model Size in Memory`
+
+**NVLink:** Required for efficient tensor parallelism. Without NVLink, AllReduce over PCIe becomes the bottleneck.
+
+**NVSwitch:** Full-bisection bandwidth GPU fabric. Enables any-to-any GPU communication at full NVLink speed within a node.
+
+**CPU offloading:**
+- KV cache offload to CPU RAM (vLLM swap-space)
+- Optimizer state offload during training (ZeRO-Offload)
+- Full model offload to NVMe (ZeRO-Infinity, llama.cpp)
+
+**Cost analysis:** Right-size GPU to model; quantize to fit more on fewer GPUs; spot instances for stateless serving (60–90% savings); model routing for cost optimization.
+
+---
+
+## 7.2 RAG Architecture
+
+*(Full deep-dive guide available separately)*
+
+### Foundational Concepts
+
+**Why RAG:** LLMs have knowledge cutoffs, hallucinate, and can't access private data. RAG solves all three at query time.
+
+**Basic pipeline:** Embed query → retrieve similar chunks → augment prompt → generate.
+
+**RAG vs fine-tuning:** RAG for knowledge injection and private data; fine-tuning for behavior, style, and format. Often combined.
+
+**Architecture levels:**
+- Naive RAG: Basic embed-retrieve-generate
+- Advanced RAG: Pre/post retrieval optimizations (reranking, query rewriting, compression)
+- Modular RAG: Composable, swappable modules for each pipeline step
+
+### Embeddings
+
+**What they do:** Map text to dense vectors in high-dimensional space; semantically similar texts are geometrically close.
+
+**Popular models:**
+- OpenAI text-embedding-3-large (3072 dims, proprietary)
+- Cohere embed-v4 (1024 dims, multilingual)
+- BGE-M3 (1024 dims, open source, multilingual, 8192 context)
+- E5-large-v2 (1024 dims, needs "query:"/"passage:" prefix)
+- nomic-embed-text-v1.5 (768 dims, fully open source)
+
+**Evaluation:** MTEB benchmark for general ranking; build a task-specific eval set from your domain.
+
+**Dimensionality tradeoffs:** Higher dims = better quality, more storage, slower search. 768–1024 is the sweet spot for most production systems.
+
+**Self-hosting:** TEI (Text Embeddings Inference) by HuggingFace; supports batching, GPU acceleration, and quantization.
+
+**Multimodal embeddings:** CLIP (image+text shared space); ColPali/ColQwen (page-level image embeddings for PDFs).
+
+### Chunking Strategies
+
+**Fixed-size with overlap:** Simple, fast. Good default for unstructured text. 256–1024 tokens, 10–20% overlap.
+
+**Recursive character splitting:** Uses a hierarchy of separators (paragraph → sentence → word). Better than fixed-size for natural text. LangChain's default.
+
+**Semantic chunking:** Split on meaning boundaries using embedding similarity between consecutive sentences. Coherent chunks, variable size.
+
+**Document-structure-aware:** Respect headers, sections, tables, lists. Best for structured documents (Markdown, HTML, PDFs with clear structure).
+
+**Agentic chunking:** LLM decides chunk boundaries. Best quality, most expensive.
+
+**Parent-document retrieval:** Small chunks for retrieval, return larger parent for context.
+
+**Metadata enrichment per chunk:** source, page_number, section_title, document_date, document_type, language, summary, hypothetical_questions.
+
+### Vector Databases
+
+**Core concepts:**
+- Distance metrics: Cosine similarity (text), Euclidean (when magnitude matters), dot product (fast, unnormalized)
+- ANN algorithms: HNSW (best recall, memory-heavy), IVF (cluster-based, less memory), PQ/IVFPQ (compressed, lossy), DiskANN (billion-scale, SSD-based)
+- HNSW parameters: M (connections, default 16), ef_construction (build quality, default 200), ef_search (query recall, default 100)
+
+**Pinecone:** Fully managed, serverless. Indexes, namespaces, metadata filtering, hybrid search. Zero ops, vendor lock-in.
+
+**Weaviate:** Open source, self-hostable. Rich schema, built-in vectorizers, multi-tenancy, hybrid BM25+vector. Good for feature-rich self-hosted deployments.
+
+**Milvus/Zilliz:** High-performance open source. Multiple index types (IVF_FLAT, IVF_PQ, HNSW, DiskANN), GPU indexing, billion-scale. Most complex to operate.
+
+**pgvector:** PostgreSQL extension. HNSW and IVF-FLAT indexes. Best when < 5M vectors, already on Postgres, need SQL joins alongside vector search.
+
+**Qdrant:** Rust-based, strong performance, named vectors, rich payload filtering. Growing fast.
+
+**Chroma:** Lightweight, embedded. Development and prototyping only.
+
+**Redis Vector Search:** Good when already using Redis, smaller scale.
+
+### Retrieval Strategies
+
+**Hybrid search:** Dense vector + sparse BM25 combined with alpha weighting or Reciprocal Rank Fusion (RRF). Covers both semantic and keyword retrieval.
+
+**Reranking:** Two-stage: retrieve top-50 with vector search → rerank to top-5 with cross-encoder (Cohere Rerank, BGE-reranker-v2, FlashRank). Adds 50–200ms but significant quality improvement.
+
+**Multi-query retrieval:** LLM generates 3–5 query variations; union of results improves recall.
+
+**HyDE:** Generate a hypothetical answer, embed it, search with that embedding instead of the raw query.
+
+**Contextual compression:** LLM extracts only relevant sentences from retrieved chunks.
+
+**Multi-index routing:** Route queries to different indexes based on intent (FAQ vs technical docs vs policy).
+
+**Recursive retrieval:** Iteratively refine retrieval — retrieve, evaluate, re-query if needed.
+
+### Advanced RAG Patterns
+
+**Self-RAG:** Model generates reflection tokens to decide when to retrieve and self-evaluate its outputs. Requires a fine-tuned model.
+
+**CRAG (Corrective RAG):** Evaluate retrieval quality with a classifier; fall back to web search if retrieval confidence is low.
+
+**Graph RAG:** Extract entities and relationships, build a knowledge graph, traverse it for retrieval. Better for complex cross-document reasoning.
+
+**Agentic RAG:** An agent autonomously decides how to retrieve — multi-step, multi-tool, multi-index.
+
+**Multi-modal RAG:** Retrieve and reason over images, tables, and charts alongside text. Options: text extraction, page-image embeddings (ColPali), hybrid.
+
+### RAG Evaluation
+
+**Retrieval metrics:** Context precision (fraction of retrieved chunks that are relevant), context recall (fraction of relevant chunks retrieved), MRR, NDCG@k.
+
+**Generation metrics:** Faithfulness (no hallucination), answer relevancy, answer correctness.
+
+**Frameworks:** RAGAS (faithfulness, answer relevancy, context precision/recall), DeepEval (hallucination, toxicity, conversation evaluation), Promptfoo (A/B testing, regression testing).
+
+---
+
+## 7.3 Fine-Tuning Infrastructure
+
+### When to Fine-Tune
+
+Fine-tune for: consistent output format, domain-specific language and tone, specialized task performance, behavior modification (follow specific instructions reliably).
+
+Use RAG instead for: current information, private data access, knowledge injection, quick updates.
+
+Combine both: Fine-tune for format/style + RAG for knowledge.
+
+### Fine-Tuning Approaches
+
+**LoRA (Low-Rank Adaptation):**
+- Freeze base model weights; add trainable low-rank matrices to attention layers
+- ΔW = B × A where B ∈ R^(d×r), A ∈ R^(r×k), rank r << d
+- Parameters: rank r (typically 8–128; higher = more expressive, more memory), alpha (scaling, typically = rank or 2×rank), target modules (q_proj, v_proj, all linear layers)
+- Memory savings: Only r×(d+k) parameters instead of d×k; typically < 1% of base model parameters
+- Merging: LoRA weights can be merged back into base model for zero-overhead inference
+- Multi-LoRA serving: S-LoRA, Punica — serve base model + hundreds of LoRA adapters on same GPU
+
+**QLoRA (Quantized LoRA):**
+- Quantize base model to 4-bit NF4 (NormalFloat4) — reduces base model memory by ~75%
+- Train LoRA adapters in BF16 (full precision for the trainable parts)
+- Double quantization: Also quantize the quantization constants (saves ~0.5 bits/parameter)
+- Paged optimizers: Offload optimizer states to CPU RAM with unified memory (handles GPU OOM gracefully)
+- Enables fine-tuning a 70B model on a single 48GB GPU
+- Slight quality degradation vs full LoRA due to quantization noise
+
+**PEFT (Parameter-Efficient Fine-Tuning) techniques:**
+- Prefix tuning: Prepend trainable prefix tokens to keys and values in attention
+- Prompt tuning: Learn soft prompt embeddings (simplest, weakest)
+- IA³: Rescale activations with learned vectors — very few parameters
+- AdaLoRA: Adaptively allocate rank budget across layers based on importance
+
+**Full fine-tuning:**
+- Update all model weights
+- Requires FSDP or DeepSpeed ZeRO Stage 3 for large models
+- Use when: maximum quality required, sufficient GPU budget, domain shift is large
+- Risk: Catastrophic forgetting (mitigate with replay, EWC, or LoRA)
+
+### Fine-Tuning Data
+
+**Data format:**
+- Instruction format: `{"instruction": "...", "input": "...", "output": "..."}`
+- Chat format: OpenAI messages format with system/user/assistant turns
+- Apply the model's chat template (Llama 3 uses a specific template; using the wrong one hurts performance)
+
+**Data quality over quantity:** 1,000 high-quality examples often outperform 100,000 noisy examples.
+
+**Synthetic data generation:** Use GPT-4 or Claude to generate instruction-response pairs. Verify quality before training.
+
+**Data decontamination:** Ensure no test set benchmarks leak into your training data.
+
+**Tools:**
+- Argilla: Open-source data annotation and curation platform
+- Label Studio: General annotation tool
+- Hugging Face datasets: Preprocessing and dataset management
+
+### Fine-Tuning Tooling
+
+**Hugging Face TRL (Transformer Reinforcement Learning):**
+- SFTTrainer: Supervised fine-tuning with PEFT integration
+- DPOTrainer: Direct Preference Optimization (alignment)
+- RewardTrainer: Training reward models
+- PPOTrainer: RLHF with PPO
+- DataCollatorForCompletionOnlyLM: Mask prompt tokens in loss computation
+
+**Axolotl:**
+- YAML-based configuration for complex fine-tuning setups
+- Supports LoRA, QLoRA, full fine-tuning
+- Handles dataset mixing, chat templates, and multi-GPU automatically
+- Preferred by practitioners for "production" fine-tuning runs
+
+**Unsloth:**
+- 2–5x faster training via custom CUDA kernels
+- 70% less memory through manual gradient computation
+- Drop-in replacement for HuggingFace Trainer
+- Best for single-GPU fine-tuning where speed matters
+
+**LLaMA-Factory:**
+- Web UI for fine-tuning (good for data scientists)
+- Supports 100+ models out of the box
+- Distributed training support
+
+**Cloud compute for fine-tuning:**
+- Lambda Labs, RunPod, CoreWeave, Vast.ai: Cheaper GPU rentals
+- Modal, Replicate: Serverless GPU for fine-tuning jobs
+- AWS SageMaker, GCP Vertex AI: Managed training with enterprise features
+
+### Alignment Techniques
+
+**RLHF (Reinforcement Learning from Human Feedback):**
+1. Supervised fine-tuning on demonstrations
+2. Train a reward model on human preference data (which response is better?)
+3. Use PPO (Proximal Policy Optimization) to optimize the LLM against the reward model
+
+**DPO (Direct Preference Optimization):**
+Skips the reward model. Directly optimizes the policy using human preference pairs (chosen vs rejected responses). Simpler, more stable than PPO. The current standard for alignment.
+
+**Study:** KL divergence constraint (preventing the model from straying too far from the base model), beta parameter in DPO (controls KL penalty strength), choosing reference model.
+
+### Post-Training Evaluation
+
+**LM Evaluation Harness:** Standardized evaluation on benchmarks (MMLU, HellaSwag, ARC, TruthfulQA, etc.)
+
+**Human evaluation:** Pair comparisons, Likert scales, task-specific rubrics.
+
+**Domain-specific eval sets:** Build your own test set from real use cases. The most important evaluation.
+
+**Model merging:**
+- TIES merging: Resolves parameter conflicts when merging multiple fine-tuned models
+- DARE: Drops random fine-tuned weights before merging to reduce interference
+- Model soups: Average weights of multiple fine-tuned models for ensemble effect
+
+---
+
+## 7.4 Prompt Management & Evaluation
+
+### Prompt Engineering Fundamentals
+
+**Zero-shot:** Direct instruction with no examples. Works for simple tasks with capable models.
+
+**Few-shot:** Provide 2–10 examples of desired input-output behavior. Improves reliability dramatically for complex tasks.
+
+**Chain-of-Thought (CoT):** Ask the model to reason step-by-step before answering. Dramatically improves performance on reasoning tasks. "Let's think step by step."
+
+**ReAct:** Interleave reasoning (Thought) with actions (Act) and observations. Foundation for agents.
+
+**System prompts:** Instructions that persist across all turns. Define persona, capabilities, constraints, output format.
+
+**Structured output prompting:** Specify the exact JSON schema in the prompt. Use with constrained decoding for guaranteed valid output.
+
+**Meta-prompting:** Use an LLM to generate or improve prompts. Automatic Prompt Engineer (APE) for automated prompt optimization.
+
+### Prompt Management in Production
+
+**Version control for prompts:**
+- Store prompts in Git as `.txt`, `.yaml`, or `.json` files
+- Use semantic versioning for major prompt changes
+- Tag prompt versions that correspond to production deployments
+- Never hardcode prompts in application code — treat them as configuration
+
+**Prompt registries:**
+- LangSmith: Prompt Hub for versioned, annotated prompts
+- Langfuse: Prompt management with versioning and A/B testing
+- Custom: Simple Git + API service for prompt retrieval
+
+**Environment-specific prompts:**
+- Different prompts for dev/staging/prod
+- A/B test prompt variants in production
+- Gradual rollout of prompt changes (same as canary deployments)
+
+**Dynamic prompts:**
+- Template variables for runtime injection (`{{user_name}}`, `{{context}}`)
+- Conditional prompt assembly based on request properties
+- Few-shot example selection based on semantic similarity to the query
+
+### LLM Evaluation
+
+**Task-specific automated metrics:**
+- BLEU, ROUGE: N-gram overlap for summarization and translation (poor correlation with human judgment for open-ended tasks)
+- METEOR, BERTScore: Semantic similarity-based metrics
+- Exact match, F1: For QA with specific correct answers
+- Pass@k: For code generation (does at least 1 of k samples pass tests?)
+
+**LLM-as-Judge:**
+Use a powerful model (GPT-4, Claude) to evaluate another model's outputs. Score on dimensions like helpfulness, harmlessness, honesty, coherence, factual accuracy. Key concerns: position bias (judge prefers first answer), verbosity bias (judge prefers longer answers), self-enhancement bias (judge prefers its own outputs).
+
+**Evaluation frameworks:**
+- RAGAS: Faithfulness, answer relevancy, context precision/recall for RAG
+- DeepEval: Rich set of metrics, CI/CD integration, regression testing
+- Promptfoo: Multi-model comparison, custom assertions, HTML reports
+- Braintrust: Experiment tracking for evals with human feedback integration
+- OpenAI Evals: Framework for evaluation datasets and metrics
+
+**Building your golden test set:**
+- 50–200 representative real-world queries
+- Ground truth answers (human-labeled or from authoritative sources)
+- Include edge cases: empty input, very long input, adversarial input, ambiguous queries, out-of-scope queries
+- Treat the test set as sacred — never train on it, never optimize against it directly
+
+**Regression testing:**
+- Run eval suite on every code/prompt change
+- Track metrics over time in a dashboard
+- Alert on metric drops above a threshold (e.g., > 5% faithfulness decrease)
+
+---
+
+## 7.5 LLM Observability & Guardrails
+
+### What to Monitor for LLMs
+
+**Infrastructure metrics (your SRE instincts apply):**
+- TTFT (Time to First Token): P50, P95, P99
+- ITL (Inter-Token Latency): P50, P95
+- Request throughput (requests/sec)
+- Token throughput (tokens/sec, input and output separately)
+- Error rate (4xx, 5xx, model errors)
+- GPU utilization and memory utilization
+- KV cache utilization (vLLM exposes this)
+- Request queue depth and wait time
+
+**ML-specific metrics:**
+- Token usage per request (input tokens, output tokens, total)
+- Cost per request (tokens × price/token)
+- Model quality scores (faithfulness, relevancy, hallucination rate)
+- Retrieval quality (for RAG: context precision, recall)
+- User feedback signals (thumbs up/down, explicit ratings)
+- Refusal rate (how often does the model refuse to answer)
+- Output length distribution
+
+### Observability Tools
+
+**LangSmith:**
+- Trace every LLM call, chain, and agent run
+- See exact prompts and completions for every request
+- Latency breakdown per chain step
+- Dataset management for evaluation
+- Human annotation workflows
+- Feedback collection and aggregation
+- Online evaluation (automated scoring of production traces)
+
+**Langfuse (open source, self-hostable):**
+- LangSmith alternative with full data control
+- Tracing with span hierarchy
+- Prompt management with versioning
+- Metric dashboards
+- Human annotation interface
+- Self-host on Docker or Kubernetes (PostgreSQL + Redis)
+
+**Arize Phoenix (open source):**
+- LLM tracing and evaluation
+- Embedding visualization (UMAP/t-SNE of queries and retrieved chunks)
+- Data drift detection for embeddings
+- RAG-specific metrics
+
+**Helicone:**
+- LLM proxy: Insert between your application and the LLM API
+- Automatic logging without code changes
+- Caching (semantic and exact match)
+- Rate limiting per user/org
+- Cost tracking and alerting
+
+**OpenTelemetry for LLMs:**
+- Extending standard OTel to LLM workloads
+- LLM-specific spans and attributes (model name, token counts, prompts)
+- Works with existing OTel infrastructure (Grafana, Jaeger)
+- OpenTelemetry Semantic Conventions for LLMs (emerging standard)
+
+### Guardrails & Safety
+
+**Input guardrails (validate before sending to LLM):**
+- Prompt injection detection: Identify attempts to override system prompt
+- Jailbreak detection: Classifier or rule-based detection of adversarial inputs
+- PII detection: Flag or redact personal information in user input (Microsoft Presidio, custom NER)
+- Content policy enforcement: Block prohibited topics before model call
+- Rate limiting: Per user, per IP, per organization
+
+**Output guardrails (validate before returning to user):**
+- Toxicity and content filtering: Classify output safety (Perspective API, custom classifiers)
+- Hallucination detection: Check if claims are grounded in context (for RAG)
+- PII in output: Detect and redact PII generated by the model
+- Format validation: Ensure output matches required schema (JSON, specific fields)
+- Length and coherence checks: Detect truncated or nonsensical outputs
+
+**Tools:**
+- Guardrails AI: Define Rails (output specifications) declaratively; validator library for common checks
+- NeMo Guardrails (NVIDIA): Programmable guardrails using Colang language; topical, safety, and dialog rails
+- LlamaGuard (Meta): Fine-tuned classifier for safety categories
+- Custom classifiers: Train your own using a small labeled dataset
+
+### Semantic Caching and Cost Optimization
+
+**Exact match caching:** Cache LLM responses for identical prompts. High hit rate for common queries.
+
+**Semantic caching:** Cache based on embedding similarity — if a new query is very similar to a cached query, return the cached response. Tools: GPTCache, Redis with vector search, Momento Semantic Cache.
+
+**Benefits:** Reduced latency, reduced cost (no LLM call for cache hits), improved consistency.
+
+**Considerations:** Cache invalidation (when knowledge changes), semantic threshold tuning (too strict = low hit rate, too loose = incorrect responses), monitoring cache hit rate.
+
+**Model routing for cost optimization:**
+- Use a small classifier to assess query complexity
+- Route simple queries to small cheap models (8B)
+- Route complex queries to large models (70B) or API (GPT-4)
+- Target: serve 80% of queries on the cheap path
+
+---
+
+## 7.6 Multi-Model Orchestration & Agent Infrastructure
+
+### Orchestration Frameworks
+
+**LangChain:**
+- LCEL (LangChain Expression Language): Compose chains with the pipe operator (`|`)
+- Runnables: Composable components (prompts, models, output parsers, retrievers)
+- Chains: Pre-built common patterns (RetrievalQA, ConversationalRetrievalChain)
+- Memory: Conversation buffer, summary, entity memory for stateful conversations
+- Tools: Python REPL, web search, custom API tools
+- Agents: ReAct, OpenAI functions, custom agent loops
+- Callbacks: Logging, streaming, monitoring hooks
+- LangGraph: Stateful multi-actor workflows (covered below)
+
+**LangGraph:**
+- Graph-based workflow definition: Nodes (functions) + Edges (transitions)
+- State: Typed state shared across nodes (messages, context, tool results)
+- Conditional edges: Branch based on state
+- Cycles: Agents can loop until a condition is met (true agents)
+- Checkpointing: Persist agent state between turns (conversation memory)
+- Human-in-the-loop: Interrupt graph for human approval before tool use
+- Multi-agent: Supervisor graph routing to specialized sub-agents
+
+**LlamaIndex:**
+- Data connectors (LlamaHub): 100+ source connectors (PDF, Notion, Slack, databases)
+- Index types: Vector, list, tree, keyword, knowledge graph
+- Query engines: Built-in RAG pipeline
+- Routers: Route queries to appropriate index or query engine
+- Sub-question decomposition: Break complex questions into sub-questions
+- Agents: ReAct and OpenAI function-calling agents
+- Workflows: Async, event-driven workflow engine (newer API)
+
+**Semantic Kernel (Microsoft):**
+- .NET first, also supports Python and Java
+- Plugin system for extending model capabilities
+- Memory and context management
+- Planner (automated multi-step planning)
+- Good choice for Microsoft/Azure ecosystem
+
+**Haystack (deepset):**
+- Pipeline-based architecture for RAG and search
+- Components: Document stores, retrievers, readers, generators
+- Focus on production NLP pipelines
+- Good for search-heavy applications
+
+### Agent Architecture
+
+**ReAct (Reasoning + Acting):**
+The foundational agent loop. Model alternates between Thought (reasoning), Action (tool call), Observation (tool result).
+```
+Thought: I need to find the current population of Tokyo
+Action: web_search("Tokyo population 2025")
+Observation: Tokyo population is approximately 13.96 million
+Thought: I have the answer
+Final Answer: Tokyo's population is approximately 13.96 million
+```
+
+**Function Calling / Tool Use:**
+- Model outputs structured JSON tool calls instead of free text
+- More reliable than ReAct parsing
+- Supported natively by GPT-4, Claude, Llama 3, Gemini
+- Study: tool schemas (name, description, parameters), parallel tool calls, tool result injection
+
+**Planning strategies:**
+- Single-step (direct tool call)
+- Multi-step (sequential tool calls with reasoning)
+- Plan-and-execute (generate full plan first, then execute steps)
+- Tree-of-Thought (explore multiple reasoning paths)
+
+**Memory for agents:**
+- In-context (conversation history in prompt): Simple but limited by context window
+- External short-term (Redis, PostgreSQL): Store conversation summaries
+- Long-term memory (vector DB + entity store): Recall past interactions semantically
+- Episodic memory: Remember specific events (MemGPT approach)
+
+**Multi-agent systems:**
+- Supervisor pattern: One orchestrator agent routes to specialized sub-agents
+- Collaborative pattern: Agents debate and verify each other's outputs
+- Hierarchical: Manager → sub-managers → worker agents
+- Swarm: Decentralized, agents hand off to each other based on context
+
+**Agent evaluation:**
+- Trajectory evaluation: Was the sequence of tool calls correct?
+- Final answer correctness: Is the output right?
+- Efficiency: Did the agent take unnecessary steps?
+- Robustness: Does it handle tool failures gracefully?
+
+### Model Context Protocol (MCP)
+
+MCP is the emerging standard (from Anthropic) for connecting LLMs to external tools and data sources.
+
+Study:
+- MCP architecture: Client (LLM application) + Server (tool/data provider)
+- Three primitives: Resources (read data), Tools (execute actions), Prompts (reusable templates)
+- Transport: stdio (local process), HTTP + SSE (remote server)
+- Building MCP servers: Python SDK, TypeScript SDK
+- Authentication and security for remote MCP servers
+- Why MCP matters: Standardizes the integration layer so tools work with any LLM — like USB-C for AI
+
+### LLM Gateway Pattern
+
+A centralized proxy/gateway for all LLM traffic in your organization.
+
+**LiteLLM:**
+- Unified API for 100+ LLM providers (OpenAI, Anthropic, Bedrock, Vertex AI, self-hosted)
+- Load balancing across multiple deployments of the same model
+- Fallback routing (primary fails → backup model)
+- Rate limiting per API key
+- Cost tracking and budget enforcement
+- Prompt caching pass-through
+- Deploy as a proxy server
+
+**Portkey:**
+- Similar to LiteLLM with additional features
+- Semantic caching, guardrails, load balancing
+- Managed cloud version available
+
+**Kong AI Gateway:**
+- Enterprise API gateway with LLM-specific plugins
+- Rate limiting, authentication, logging, semantic caching
+- Good for organizations already using Kong
+
+---
+
+# Phase 8: Monitoring, Observability & Reliability for ML
+
+> **Goal:** Apply and extend your SRE expertise to ML-specific operational challenges. This is where your background gives you a significant head start over pure ML engineers.
+>
+> **Time estimate:** 3–4 weeks
+
+---
+
+## 8.1 ML-Specific Monitoring
+
+### Model Drift Detection
+
+**Data drift (covariate shift):** The distribution of input features changes over time. The model was trained on one distribution and is now seeing a different one.
+
+**Concept drift:** The relationship between inputs and outputs changes over time (the world changed). The model's predictions become wrong even though inputs look similar.
+
+**Prediction drift:** The distribution of model outputs changes over time. Leading indicator of concept drift.
+
+**Label drift:** The distribution of true labels changes (if you have ground truth).
+
+**Statistical tests for drift:**
+- KS test (Kolmogorov-Smirnov): Continuous features. Tests if two distributions are different.
+- Chi-squared test: Categorical features. Tests independence from expected distribution.
+- Population Stability Index (PSI): Compares feature distributions between training and production
+- Maximum Mean Discrepancy (MMD): Distribution-level comparison
+- Wasserstein distance: Earth mover's distance between distributions
+
+**Tools:**
+- Evidently AI: Open-source ML monitoring. Reports for data drift, model performance, data quality. Integrates with Grafana.
+- Whylabs: Cloud-based, uses WhyLogs library. Real-time drift monitoring.
+- Arize: Enterprise ML observability. Strong embedding drift visualization.
+- Nannyml: Confidence-based performance monitoring without labels (CBPE)
+
+### GPU Observability
+
+**DCGM (Data Center GPU Manager):**
+- NVIDIA's toolkit for GPU telemetry in data centers
+- Metrics: GPU utilization, memory utilization, SM occupancy, memory bandwidth, temperature, power draw, PCIe throughput, NVLink throughput, error counts (ECC, XID errors)
+- DCGM Exporter: Prometheus-compatible exporter for Kubernetes
+- Study: DCGM health checks, error codes (XID errors and their meanings), integration with Grafana dashboards
+
+**nvidia-smi:**
+- `nvidia-smi dmon`: Continuous monitoring of GPU metrics
+- `nvidia-smi nvlink -s`: NVLink status and bandwidth
+- `nvidia-smi mig -lgi`: MIG instance status
+- `nvidia-smi topo -m`: GPU topology (PCIe vs NVLink connectivity)
+
+**Key GPU metrics to alert on:**
+- GPU utilization < 60% for extended periods (underutilization, wasted compute)
+- Memory utilization > 95% (risk of OOM errors)
+- Temperature > 85°C (throttling or hardware risk)
+- ECC memory errors (hardware degradation)
+- XID errors (GPU fault codes — many indicate hardware failure)
+- Power exceeding TDP (thermal design power)
+
+### SLOs and SLIs for Model Serving
+
+**Adapt SRE concepts to ML:**
+
+| SLI Type | Traditional | ML Serving |
+|----------|-------------|------------|
+| Latency | Request p99 < 200ms | TTFT p95 < 500ms, ITL p95 < 50ms |
+| Availability | Error rate < 0.1% | Successful completions / Total requests |
+| Throughput | Requests/sec | Tokens/sec (input + output) |
+| Quality | N/A | Faithfulness > 0.8, Answer relevancy > 0.7 |
+| Freshness | Data age < 1 hour | Model age, knowledge cutoff, RAG index age |
+
+**Defining SLOs for model quality:**
+This is harder than infrastructure SLOs. Options:
+- Sample-based evaluation: Evaluate 1% of production traffic automatically
+- User feedback signals: Track thumbs up/down rates, regeneration requests
+- Business metrics: Downstream task completion rates, user session length
+- Canary-based: Compare new model quality vs production continuously
+
+## 8.2 Cost Monitoring and Optimization
+
+**What to track:**
+- GPU instance cost per hour (on-demand vs spot)
+- Cost per 1,000 tokens (input and output separately)
+- Cost per request
+- Cost per user
+- GPU utilization (low utilization = waste)
+- Cache hit rate (higher = lower cost)
+- Token usage by model (which model is most expensive?)
+
+**Tools:**
+- Custom dashboards: Combine GPU billing data with token usage logs
+- Cloud cost management: AWS Cost Explorer, GCP Billing, Azure Cost Management
+- Infracost: IaC cost estimation
+- FinOps practices applied to GPU spend
+
+**Optimization levers:**
+- Right-size GPU type to model size
+- Quantize models to fit more on fewer GPUs
+- Maximize batch size to improve GPU utilization
+- Semantic caching to reduce redundant LLM calls
+- Model routing (cheap model for simple queries)
+- Spot instances for training and stateless inference
+- Reserved instances for baseline serving capacity
+
+## 8.3 Incident Response for ML Systems
+
+**Types of ML incidents:**
+
+**Performance degradation:** Model quality drops. Could be data drift, concept drift, upstream data pipeline failure, or a bad model deployment. Harder to detect than crashes because the system is still "running."
+
+**Infrastructure failure:** GPU failure, serving pod crash, KV cache OOM. Similar to traditional infrastructure incidents.
+
+**Data pipeline failure:** Training data is stale, feature store not updated, data quality issues upstream. Can silently corrupt model predictions.
+
+**Model serving failure:** Model loaded incorrectly, wrong model version deployed, out-of-memory errors under load.
+
+**Runbooks for ML incidents:**
+- Model quality drop: Check data freshness → check feature store → check model version → compare predictions with expected distribution → rollback if needed
+- Serving OOM: Check request length distribution → check concurrent request count → reduce max-model-len or max-num-seqs → add replicas
+- High latency: Check GPU utilization → check queue depth → check batch configuration → check if preemption is occurring
+
+## 8.4 Capacity Planning for ML
+
+**Training capacity planning:**
+- Estimate compute requirements: FLOPs = 6 × Parameters × Tokens
+- Factor in utilization efficiency (40–60% effective GPU utilization for distributed training)
+- Plan for retries, checkpointing overhead, data loading overhead
+- Model: how many training runs per month? What size models?
+
+**Inference capacity planning:**
+- Estimate tokens per request (input + output)
+- Estimate requests per second (peak)
+- Calculate required throughput: tokens/sec = requests/sec × tokens/request
+- Calculate required GPUs: tokens/sec / (max_tokens_per_sec_per_GPU)
+- Add headroom: 30–50% over peak for autoscaling buffer
+
+**Autoscaling for inference:**
+- Horizontal scaling: Add more serving pods
+- Metrics for autoscaling: Request queue depth, GPU utilization, tokens/sec
+- Kubernetes HPA with custom metrics (KEDA for queue-based scaling)
+- Warm-up time: LLMs take 1–5 minutes to load — plan ahead with predictive scaling
+
+---
+
+# Phase 9: Platform Engineering for ML
+
+> **Goal:** Build the internal platform that abstracts ML infrastructure complexity, enabling data scientists and ML engineers to focus on models rather than infrastructure.
+>
+> **Time estimate:** Ongoing — this is a senior-level, continuous practice
+
+---
+
+## 9.1 Internal Developer Platforms for ML
+
+### What an ML Platform Provides
+
+An ML platform abstracts the complexity of infrastructure from ML teams. Instead of "provision a GPU cluster, set up storage, configure networking, install dependencies, set up experiment tracking," the data scientist runs one command and gets a working environment.
+
+**Platform primitives to build:**
+- **Notebook environments:** JupyterHub with GPU access, pre-installed libraries, auto-scaling
+- **Training job submission:** Simple CLI/API to submit training runs to the cluster
+- **Experiment tracking:** Centralized MLflow/W&B instance with auth and team isolation
+- **Feature store:** Managed Feast instance with data engineering team support
+- **Model registry:** Centralized registry with review and approval workflows
+- **Serving infrastructure:** Self-service model deployment (submit a model → get an endpoint)
+- **Dataset catalog:** Searchable catalog of approved, versioned datasets
+- **Cost visibility:** Show teams their GPU spend
+
+### JupyterHub for ML Teams
+
+Study:
+- JupyterHub on Kubernetes (KubeSpawner)
+- GPU profile selection (choose GPU type and count)
+- Pre-built Docker images with ML libraries (PyTorch, JAX, RAPIDS)
+- Persistent storage for notebooks and datasets
+- Resource quotas per user/team
+- Single Sign-On (SSO) integration (LDAP, SAML, OAuth)
+- Idle culling to reclaim resources from inactive notebooks
+
+## 9.2 Self-Service Training and Serving Abstractions
+
+### Training Platform
+
+**Goals:** Data scientist submits a training config → platform handles everything else.
+
+**What the platform manages:**
+- Selecting appropriate GPU type and count
+- Provisioning the Kubernetes job with correct resources
+- Setting up distributed training environment
+- Mounting datasets from the data catalog
+- Connecting to experiment tracking
+- Checkpointing and fault tolerance
+- Cost attribution
+
+**Tools:** Custom CLI wrapping `kubectl`, Kubeflow Pipelines, Ray Job API, custom web UI.
+
+### Serving Platform
+
+**Goals:** ML engineer submits a model artifact → platform handles deployment, scaling, monitoring.
+
+**What the platform manages:**
+- Optimal GPU type selection based on model size
+- vLLM/TorchServe configuration
+- Kubernetes deployment with health checks
+- Auto-scaling configuration
+- Monitoring and alerting setup
+- A/B testing and canary deployment support
+
+## 9.3 Multi-Tenancy and Resource Isolation
+
+**Namespace isolation:** Each team gets its own Kubernetes namespace with resource quotas.
+
+**GPU resource quotas:** Limit total GPU hours per team per day/month. Enforce with Kubernetes ResourceQuota and LimitRange.
+
+**Priority classes:** Research (low priority, preemptible), production (high priority, guaranteed). Production jobs are never preempted; research jobs use spare capacity.
+
+**Volcano / Yunikorn scheduling:** Advanced batch scheduling for ML workloads.
+- Fair-share scheduling between teams
+- Gang scheduling for distributed training
+- Queue management with priority
+- Preemption policies
+
+**Network policies:** Isolate training jobs from each other. Prevent data exfiltration.
+
+## 9.4 Kubernetes Operators for ML
+
+Custom operators extend Kubernetes for ML-specific workloads.
+
+**Study existing operators:**
+- Kubeflow Training Operator (PyTorchJob, TFJob, MPIJob)
+- Ray Operator (KubeRay: RayCluster, RayJob, RayService)
+- Milvus Operator (managed Milvus deployment)
+- Strimzi (Kafka operator — for streaming data pipelines)
+
+**Building custom operators:**
+- When to build: If existing operators don't meet your needs
+- Tools: Operator SDK, Kubebuilder, controller-runtime
+- Pattern: Reconciliation loop — desired state (spec) vs actual state → take actions to converge
+- Study CRD (Custom Resource Definition) design
+
+## 9.5 Cost Allocation and Chargeback
+
+**Why it matters:** Without cost visibility, teams over-provision and waste GPU resources. Showback/chargeback creates accountability.
+
+**What to track:**
+- GPU hours per team, per project, per user
+- Storage costs (dataset storage, checkpoint storage)
+- Network egress costs
+- Ratio of utilized vs allocated GPU time
+
+**Implementation:**
+- Kubernetes labels: Label every workload with team, project, environment
+- Usage aggregation: Parse GPU metrics by label (DCGM + Prometheus)
+- Cost model: GPU cost/hour × utilization hours per label
+- Dashboards: Per-team cost dashboards in Grafana
+- Alerting: Alert when team exceeds budget threshold
+
+---
+
+# Cross-Cutting Topics
+
+> These topics span all phases. Integrate them throughout your learning, don't treat them as separate.
+
+---
+
+## Cloud-Specific ML Services
+
+**Pick one cloud to go deep on based on your organization. Here are the key services for each:**
+
+### AWS
+
+| Service | What It Does | When to Use |
+|---------|-------------|-------------|
+| SageMaker | End-to-end ML platform: notebooks, training, serving | When you want managed ML on AWS |
+| SageMaker Training | Managed distributed training jobs | GPU training without managing clusters |
+| SageMaker Endpoints | Model serving with auto-scaling | Simple model serving on AWS |
+| SageMaker Pipelines | ML pipeline orchestration (Kubeflow-like) | AWS-native MLOps |
+| SageMaker Feature Store | Managed feature store | If not self-hosting Feast |
+| Bedrock | Managed API for foundation models (Claude, Llama, etc.) | When you don't want to self-host LLMs |
+| EKS with GPU nodegroups | Self-managed Kubernetes with GPU nodes | When you need full control |
+| p3/p4/p5 instances | NVIDIA V100/A100/H100 GPU instances | GPU compute for training and serving |
+| FSx for Lustre | High-performance file system for training | When S3 I/O is the bottleneck |
+| ECR | Container registry | Store training and serving Docker images |
+
+### GCP
+
+| Service | What It Does |
+|---------|-------------|
+| Vertex AI | Managed ML platform (training, pipelines, serving, registry) |
+| Vertex AI Workbench | Managed JupyterHub |
+| Vertex AI Training | Managed distributed training |
+| Vertex AI Endpoints | Model serving with autoscaling |
+| Vertex AI Pipelines | Managed Kubeflow Pipelines |
+| Model Garden | Pre-trained models and fine-tuning |
+| GKE with GPU node pools | Managed Kubernetes with GPU nodes |
+| A2/A3 instances | NVIDIA A100/H100 GPU instances |
+| TPU v4/v5 | Google's custom AI accelerators |
+| Filestore | Managed NFS for training data |
+
+### Azure
+
+| Service | What It Does |
+|---------|-------------|
+| Azure Machine Learning | End-to-end ML platform |
+| Azure ML Pipelines | ML workflow orchestration |
+| Azure ML Endpoints | Model serving |
+| Azure OpenAI Service | Managed access to OpenAI models |
+| AKS with GPU node pools | Managed Kubernetes with GPU nodes |
+| NCv3/NCasT4/NDv2 instances | GPU instances (V100, T4, A100) |
+| Azure Blob Storage | Object storage for datasets and models |
+
+## Security and Compliance for ML
+
+### Data Security in ML Pipelines
+
+- **Data encryption:** At-rest (S3 SSE, GCS CMEK) and in-transit (TLS) for training data and model artifacts
+- **Access control:** IAM roles for training jobs (least-privilege), data access audit logging
+- **PII handling:** Detect and anonymize PII before using in training data (Microsoft Presidio, cloud DLP services)
+- **Data residency:** Ensure training data doesn't cross regional boundaries in violation of regulations
+
+### Model Security
+
+- **Model access control:** Who can download model weights? Who can call the serving endpoint?
+- **API authentication:** JWT, API keys, OAuth2 for serving endpoints
+- **Model watermarking:** Embedding provenance information in model weights or outputs
+- **Adversarial robustness:** Understanding adversarial examples and how to harden models
+- **Prompt injection:** Input validation for LLM applications (see Phase 7.5)
+
+### Compliance
+
+- **GDPR:** Right to erasure — if training data is deleted, does the model need to be retrained?
+- **HIPAA:** Protected health information (PHI) in training data — special handling requirements
+- **SOC 2:** Access controls, audit logging, change management for ML systems
+- **Model cards:** Documenting model intended use, performance characteristics, limitations, biases
+- **NIST AI RMF:** AI Risk Management Framework — emerging standard for AI governance
+
+## Networking for ML
+
+### VPC and Security Groups for GPU Clusters
+
+- **Placement groups:** AWS cluster placement groups put GPU instances physically close for better network performance
+- **Enhanced networking:** AWS ENA, GCP gVNIC — higher bandwidth, lower latency networking
+- **VPC design:** Separate subnets for training nodes, serving nodes, data access
+- **Security groups:** Restrict inter-node communication to necessary ports (NCCL, SSH, monitoring)
+- **NAT gateways:** Allow GPU nodes in private subnets to reach internet for package installs
+
+### Service Mesh for ML Serving
+
+- **Istio/Linkerd:** mTLS between services, traffic management, observability
+- **Traffic splitting:** Use Istio VirtualService for A/B testing and canary deployments
+- **Circuit breakers:** Prevent cascading failures when model serving is overloaded
+- **Retries and timeouts:** Configure appropriately for LLM latency (higher timeouts for long generation)
+
+## Container Optimization for ML
+
+### CUDA Base Images
+
+- **NVIDIA CUDA images:** cuda:12.1-cudnn8-runtime-ubuntu22.04 — choose runtime vs devel, include cuDNN for training
+- **PyTorch base images:** pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
+- **TensorFlow images:** tensorflow/tensorflow:2.16.1-gpu
+- **Multi-stage builds:** Separate build stage (large) from runtime stage (smaller)
+
+### Reducing Image Size
+
+- Use runtime (not devel) CUDA images for serving (devel includes compiler tools ~4 GB)
+- Multi-stage builds: compile in large image, copy only binaries to runtime image
+- pip install with `--no-cache-dir`
+- Combine RUN commands to reduce layers
+- Use .dockerignore to exclude large files
+
+### Container Security for ML
+
+- Run as non-root user
+- Read-only root filesystem where possible
+- Drop unnecessary Linux capabilities
+- Use distroless or minimal base images
+- Scan images for vulnerabilities (Trivy, Snyk)
+
+---
+
+## Recommended Study Order Summary
+
+```
+Week 1-2:   Phase 1 (ML Fundamentals) + Phase 2 start (Neural Nets)
+Week 3-4:   Phase 2 complete (Deep Learning, Transformers)
+Week 5-6:   Phase 3 (Data Engineering for ML)
+Week 7-8:   Phase 4 start (Distributed Training, GPU Clusters)
+Week 9-10:  Phase 4 complete + Phase 5 (Model Serving)
+Week 11-12: Phase 6 (MLOps Pipelines)
+Week 13-16: Phase 7 — LLM/GenAI Infrastructure (prioritize 7.1 and 7.2)
+Week 17-18: Phase 8 (Monitoring and Reliability)
+Week 19+:   Phase 9 (Platform Engineering) — ongoing, senior-level
+Ongoing:    Cross-cutting topics woven throughout
+```
+
+## Tools Summary by Category
+
+| Category | Primary Tools | Secondary Tools |
+|----------|--------------|-----------------|
+| **Orchestration** | Airflow, Kubeflow Pipelines | Prefect, Dagster, ZenML, Metaflow |
+| **Experiment Tracking** | MLflow | Weights & Biases, Neptune |
+| **Vector Databases** | pgvector, Weaviate | Milvus, Pinecone, Qdrant |
+| **LLM Serving** | vLLM | TGI, TensorRT-LLM + Triton |
+| **Model Serving** | Triton, TorchServe | BentoML, Seldon, FastAPI |
+| **Fine-tuning** | Axolotl, TRL | Unsloth, LLaMA-Factory |
+| **LLM Frameworks** | LangChain, LangGraph | LlamaIndex, Semantic Kernel |
+| **LLM Observability** | Langfuse | LangSmith, Arize Phoenix |
+| **ML Monitoring** | Evidently AI | Whylabs, Arize |
+| **GPU Monitoring** | DCGM Exporter, Prometheus | nvidia-smi |
+| **Data Versioning** | DVC | LakeFS |
+| **Feature Stores** | Feast | Tecton |
+| **Data Validation** | Great Expectations | Pandera |
+| **Model Registry** | MLflow Registry | HuggingFace Hub |
+| **Embeddings Serving** | TEI (HF) | Infinity |
+| **Batch Scheduling** | Volcano | Yunikorn |
+| **LLM Gateway** | LiteLLM | Portkey |
+| **Guardrails** | Guardrails AI | NeMo Guardrails |
+| **Eval Frameworks** | RAGAS, DeepEval | Promptfoo, Braintrust |
+| **Container Registry** | ECR, GCR, Harbor | Quay |
+| **IaC** | Terraform | Pulumi |
+| **GitOps** | ArgoCD, Flux | — |
+| **Distributed Training** | PyTorch FSDP | DeepSpeed, Horovod |
+| **Hyperparameter Tuning** | Optuna | Ray Tune |
+| **Training Operators** | Kubeflow Training Operator | KubeRay |
